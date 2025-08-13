@@ -58,9 +58,9 @@ PORT_CODE_MAP = {
     "KRPTK": "평택항",
     "KRINC": "인천항",
     "KRKPO": "포항항",
-    "KRKAN": "군산항",
+    "KRKUV": "군산항",
     "KRUSN": "울산항",
-    "KRBSN": "부산항",
+    "KRPUS": "부산항",
     "KRGMP": "김포공항",
     "KRSEL": "인천공항",
 }
