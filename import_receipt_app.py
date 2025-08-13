@@ -221,33 +221,51 @@ def clip_text_by_norm_rect(file_bytes: bytes, norm_rect: List[float], page_rect:
 # =========================
 def extract_korean_port(text: str) -> str:
     """
-    ROI에서 읽어온 문자열에서 'KRPTK' 같은 영문/코드 제거하고,
-    '평택항/인천항/부산항/김포공항' 등 '한글+항/공항/항만/항구' 패턴 우선 추출.
-    없으면 한글 단어 중 가장 길게 보이는 것을 반환.
+    ROI 텍스트에서 항 코드/라벨/불필요 단어 제거 후
+    '한글 2글자 이상 + (공항|항만|항구|항)' 패턴으로 국내도착항을 추출한다.
+    '착항/입항/출항/도착항/선적항' 등은 제외한다.
     """
     if not text:
         return ""
     t = " ".join(text.split())
-    # 괄호 속 코드 제거: (KRPTK), (CODE) 등
-    t = re.sub(r'\([^)]+\)', ' ', t)
-    # 단독 대문자 코드 제거
-    t = re.sub(r'\b[A-Z]{3,}\b', ' ', t)
-    # 혼합 코드(숫자 포함) 제거
-    t = re.sub(r'\b[A-Z0-9\-]{3,}\b', ' ', t)
 
-    # 1) '한글 + (공항|항만|항구|항)' 패턴 우선
-    m = re.search(r'([가-힣]+(?:공항|항만|항구|항))', t)
-    if m:
-        return m.group(1)
+    # 괄호/코드/라벨 제거
+    t = re.sub(r'\([^)]+\)', ' ', t)                       # (KRPTK) 같은 괄호 내용 제거
+    t = re.sub(r'\b[A-Z0-9\-]{3,}\b', ' ', t)              # KRPTK, ABC-123 같은 코드 제거
+    t = re.sub(r'국내\s*도착\s*항\s*[:：]?', ' ', t)         # '국내도착항:' 라벨 제거
+    t = re.sub(r'도착\s*항\s*[:：]?', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
 
-    # 2) 그 외 한글 단어 후보 중 가장 긴 것
-    cand = re.findall(r'[가-힣]{2,}', t)
-    if cand:
-        cand.sort(key=len, reverse=True)
-        return cand[0]
+    # 후보 수집: 2글자 이상 + (공항|항만|항구|항)
+    cands = re.findall(r'([가-힣]{2,}(?:공항|항만|항구|항))', t)
 
-    # 3) 실패 시 원본 정리본
-    return t.strip()
+    # 자주 섞이는 비-지명 제거
+    ban = {"착항", "입항", "출항", "도착항", "선적항"}
+    cands = [c for c in cands if c not in ban]
+
+    if cands:
+        # 중복 제거(순서 보존)
+        seen = set()
+        uniq = [c for c in cands if not (c in seen or seen.add(c))]
+
+        def score(x: str):
+            # 공항 > 항만/항구 > 항, 길이 길수록 가산
+            pri = 1
+            if x.endswith("공항"): pri = 3
+            elif x.endswith("항만") or x.endswith("항구"): pri = 2
+            return (pri, len(x))
+
+        uniq.sort(key=score, reverse=True)
+        return uniq[0]
+
+    # 보조: 가장 긴 한글 단어(금지어/라벨 포함 단어 제외)
+    words = re.findall(r'[가-힣]{2,}', t)
+    words = [w for w in words if w not in ban and not re.search(r'(국내|도착|입|출|착)항?$', w)]
+    if words:
+        words.sort(key=len, reverse=True)
+        return words[0]
+
+    return ""
 
 # =========================
 # 필드 후처리 규칙 (ROI → 정제)
