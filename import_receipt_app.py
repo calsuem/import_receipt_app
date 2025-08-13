@@ -3,6 +3,7 @@
 # 📄 수입신고필증 PDF → 엑셀 자동화 (전 항목 ROI 템플릿 · 영구 저장/불러오기 · 시각 오버레이)
 # ✨ 한글 폰트: "맑은 고딕" 우선 + 폴백(Noto/Nanum) + PIL 라벨도 동일 적용
 # ✨ 템플릿: 최초 저장 → 이후 자동 사용(Last Used) · 필요시 전환/삭제/가져오기/내보내기
+# ✨ 국내도착항: '항 코드(KRPTK 등) 무시' + '한글만 추출'로 변경
 # ------------------------------------------------------------
 
 import io
@@ -18,6 +19,12 @@ import streamlit as st
 import pandas as pd
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    from streamlit_image_coordinates import streamlit_image_coordinates
+except ImportError:
+    st.error("📦 streamlit-image-coordinates가 필요합니다.\n\npip install streamlit-image-coordinates")
+    st.stop()
 
 # =========================
 # 전역 설정 및 상수
@@ -53,18 +60,6 @@ FIELD_COLORS: Dict[str, str] = {
     "신고번호":      "#D35400",
 }
 
-# 항 코드 → 한글명
-PORT_CODE_MAP = {
-    "KRPTK": "평택항",
-    "KRINC": "인천항",
-    "KRKPO": "포항항",
-    "KRKAN": "군산항",
-    "KRUSN": "울산항",
-    "KRBSN": "부산항",
-    "KRGMP": "김포공항",
-    "KRSEL": "인천공항",
-}
-
 _AMOUNT_PATTERN = r'([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,})\s*원?'
 
 # =========================
@@ -76,7 +71,6 @@ def ensure_korean_fonts():
     - UI: CSS로 '맑은 고딕' 우선, 폴백 스택 지정
     - PIL: 시스템/동봉/다운로드 순으로 폰트 탐색하여 적용
     """
-    # 1) UI(CSS) 전역 폰트 적용
     css_font_stack = "'Malgun Gothic','Apple SD Gothic Neo','Nanum Gothic','Noto Sans KR',sans-serif"
     st.markdown(
         f"""
@@ -93,26 +87,21 @@ def ensure_korean_fonts():
         unsafe_allow_html=True,
     )
 
-    # 2) PIL 라벨 폰트 준비
-    # 우선순위 경로 후보
+    # PIL 라벨 폰트
     candidates = [
-        "C:/Windows/Fonts/malgun.ttf",  # Windows
+        "C:/Windows/Fonts/malgun.ttf",  # Windows - 맑은 고딕
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",  # macOS
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",  # Ubuntu/Nanum
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
     ]
-
     font_path = None
     for p in candidates:
         if os.path.exists(p):
             font_path = p
             break
-
-    # 없으면 Google Fonts에서 NotoSansKR-Regular 다운로드(런타임 1회)
     if font_path is None:
-        font_dir = Path("fonts")
-        font_dir.mkdir(exist_ok=True)
+        font_dir = Path("fonts"); font_dir.mkdir(exist_ok=True)
         font_path = str(font_dir / "NotoSansKR-Regular.otf")
         if not os.path.exists(font_path):
             try:
@@ -121,17 +110,14 @@ def ensure_korean_fonts():
                     font_path
                 )
             except Exception:
-                # 다운로드 실패 시 기본 폰트(라벨은 영문)로 대체
                 font_path = None
 
-    # PIL Font 객체 생성
     pil_font = None
     try:
         if font_path and os.path.exists(font_path):
             pil_font = ImageFont.truetype(font_path, size=16)
     except Exception:
         pil_font = None
-
     return pil_font
 
 PIL_LABEL_FONT = ensure_korean_fonts()
@@ -193,13 +179,10 @@ def load_all_templates() -> Dict[str, dict]:
             return {"__meta": {}}
     return {"__meta": {}}
 
-
 def save_all_templates(all_tmpls: Dict[str, dict]) -> None:
-    # meta 키 보존
     if "__meta" not in all_tmpls:
         all_tmpls["__meta"] = {}
     Path(TEMPLATES_FILE).write_text(json.dumps(all_tmpls, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def set_last_used(all_tmpls: Dict[str, dict], name: str):
     if "__meta" not in all_tmpls:
@@ -207,16 +190,13 @@ def set_last_used(all_tmpls: Dict[str, dict], name: str):
     all_tmpls["__meta"]["last_used"] = name
     save_all_templates(all_tmpls)
 
-
 def get_last_used(all_tmpls: Dict[str, dict]) -> str | None:
-    meta = all_tmpls.get("__meta", {})
-    return meta.get("last_used")
+    return all_tmpls.get("__meta", {}).get("last_used")
 
 # =========================
 # PDF 관련: 렌더/텍스트 클립
 # =========================
-def pdf_first_page_pix(file_bytes: bytes, dpi: int = DPI_DEFAULT) -> Tuple[Image.Image, int, int, fitz.Rect]:
-    """1페이지를 이미지로 렌더하고, (PIL.Image, width, height, page_rect) 반환."""
+def pdf_first_page_pix(file_bytes: bytes, dpi: int = DPI_DEFAULT) -> tuple[Image.Image, int, int, fitz.Rect]:
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         page = doc.load_page(0)
         mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
@@ -224,9 +204,7 @@ def pdf_first_page_pix(file_bytes: bytes, dpi: int = DPI_DEFAULT) -> Tuple[Image
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         return img, pix.width, pix.height, page.rect
 
-
 def clip_text_by_norm_rect(file_bytes: bytes, norm_rect: List[float], page_rect: fitz.Rect) -> str:
-    """정규화(0~1) rect로 1페이지에서 텍스트 클립."""
     x1n, y1n, x2n, y2n = norm_rect
     x1 = page_rect.x0 + page_rect.width * x1n
     y1 = page_rect.y0 + page_rect.height * y1n
@@ -239,7 +217,40 @@ def clip_text_by_norm_rect(file_bytes: bytes, norm_rect: List[float], page_rect:
         return " ".join(txt.split())
 
 # =========================
-# 필드 후처리 규칙 (ROI에서 추출된 raw 텍스트 → 정제)
+# 국내도착항(한글만) 추출 도우미
+# =========================
+def extract_korean_port(text: str) -> str:
+    """
+    ROI에서 읽어온 문자열에서 'KRPTK' 같은 영문/코드 제거하고,
+    '평택항/인천항/부산항/김포공항' 등 '한글+항/공항/항만/항구' 패턴 우선 추출.
+    없으면 한글 단어 중 가장 길게 보이는 것을 반환.
+    """
+    if not text:
+        return ""
+    t = " ".join(text.split())
+    # 괄호 속 코드 제거: (KRPTK), (CODE) 등
+    t = re.sub(r'\([^)]+\)', ' ', t)
+    # 단독 대문자 코드 제거
+    t = re.sub(r'\b[A-Z]{3,}\b', ' ', t)
+    # 혼합 코드(숫자 포함) 제거
+    t = re.sub(r'\b[A-Z0-9\-]{3,}\b', ' ', t)
+
+    # 1) '한글 + (공항|항만|항구|항)' 패턴 우선
+    m = re.search(r'([가-힣]+(?:공항|항만|항구|항))', t)
+    if m:
+        return m.group(1)
+
+    # 2) 그 외 한글 단어 후보 중 가장 긴 것
+    cand = re.findall(r'[가-힣]{2,}', t)
+    if cand:
+        cand.sort(key=len, reverse=True)
+        return cand[0]
+
+    # 3) 실패 시 원본 정리본
+    return t.strip()
+
+# =========================
+# 필드 후처리 규칙 (ROI → 정제)
 # =========================
 def postprocess_field(name: str, raw: str):
     text = " ".join((raw or "").split())
@@ -249,11 +260,7 @@ def postprocess_field(name: str, raw: str):
         return m.group(1) if m else ""
 
     if name == "국내도착항":
-        m = re.search(r'\b([A-Z]{5})\b', text)
-        if m:
-            return PORT_CODE_MAP.get(m.group(1), m.group(1))
-        m = re.search(r'([가-힣A-Za-z]+)', text)
-        return m.group(1) if m else text
+        return extract_korean_port(text)
 
     if name == "신고일":
         return fmt_date_uniform(text)
@@ -263,7 +270,6 @@ def postprocess_field(name: str, raw: str):
         return clean_number(m.group(1)) if m else clean_number(text)
 
     if name == "세율(구분)":
-        # "관 8.00 (설명)" → 8.00 만 남김, 없으면 숫자만
         m = re.search(r'관\s*([0-9.]+)', text)
         if not m:
             m = re.search(r'([0-9.]+)', text)
@@ -288,7 +294,7 @@ def ensure_state():
     if "all_templates" not in st.session_state:
         st.session_state.all_templates = load_all_templates()
 
-    # 🔸 마지막 사용 템플릿 자동 로드(최초 1회)
+    # 자동 로드: 마지막 사용 템플릿
     if "auto_loaded" not in st.session_state:
         st.session_state.auto_loaded = True
         last = get_last_used(st.session_state.all_templates)
@@ -305,16 +311,16 @@ def ensure_state():
     if "display_width" not in st.session_state:
         st.session_state.display_width = 1000
     if "click_phase" not in st.session_state:
-        st.session_state.click_phase = 0   # 0=좌상단, 1=우하단
+        st.session_state.click_phase = 0
     if "temp_points" not in st.session_state:
-        st.session_state.temp_points = []  # [(x,y)] in 원본 좌표
+        st.session_state.temp_points = []
     if "current_field_idx" not in st.session_state:
         st.session_state.current_field_idx = 0
     if "lock_template" not in st.session_state:
-        st.session_state.lock_template = True  # ✅ 기본: 마지막 템플릿 고정 사용
+        st.session_state.lock_template = True  # 기본: 마지막 템플릿 고정 사용
 
 # =========================
-# 오버레이 렌더링 (저장 ROI + 임시 클릭점)
+# 오버레이 렌더링
 # =========================
 def render_with_overlays(img_resized: Image.Image, w_orig: int, h_orig: int, ratio: float,
                          norm_rects: Dict[str, List[float]], temp_points: List[Tuple[float, float]],
@@ -325,7 +331,6 @@ def render_with_overlays(img_resized: Image.Image, w_orig: int, h_orig: int, rat
     def to_disp(x, y):
         return (x * ratio, y * ratio)
 
-    # 저장된 ROI 박스
     for name, rect in norm_rects.items():
         color = FIELD_COLORS.get(name, "#FF00FF")
         x1n, y1n, x2n, y2n = rect
@@ -334,7 +339,6 @@ def render_with_overlays(img_resized: Image.Image, w_orig: int, h_orig: int, rat
         dx1, dy1 = to_disp(x1, y1); dx2, dy2 = to_disp(x2, y2)
         for off in range(2):
             draw.rectangle([dx1 - off, dy1 - off, dx2 + off, dy2 + off], outline=color, width=2)
-        # 라벨
         label = name
         pad = 6
         tw = max(60, len(label) * 10)
@@ -347,7 +351,6 @@ def render_with_overlays(img_resized: Image.Image, w_orig: int, h_orig: int, rat
         else:
             draw.text((bx1 + pad, by1 + pad), label, fill="white")
 
-    # 임시 클릭점/박스 (현재 필드)
     if temp_points:
         color = FIELD_COLORS.get(current_field or "", "#FF00FF")
         if len(temp_points) == 1:
@@ -378,17 +381,14 @@ def main():
     <p style="text-align:center;color:#555;">한 번 좌표 지정 → 계속 사용(자동 로드). 필요하면 언제든 템플릿 전환.</p>
     """, unsafe_allow_html=True)
 
-    # ----------------------
     # 템플릿 관리
-    # ----------------------
     with st.expander("🧩 템플릿 관리", expanded=True):
         c0, c1, c2, c3, c4 = st.columns([1.2, 2, 1, 1, 1])
         with c0:
-            st.checkbox("현재 템플릿 고정 사용", key="lock_template", help="체크 시 ROI 재지정 섹션을 건너뛰고 바로 변환에 사용")
-
+            st.checkbox("현재 템플릿 고정 사용", key="lock_template",
+                        help="체크 시 ROI 재지정 섹션을 건너뛰고 바로 변환에 사용")
         with c1:
             st.text_input("템플릿 이름", key="template_name", placeholder="예) UNIPASS_2025_v1")
-
         with c2:
             if st.button("💾 현재 좌표 저장", use_container_width=True, type="primary"):
                 name = st.session_state.template_name.strip()
@@ -407,7 +407,6 @@ def main():
                     st.success(f"저장 & 마지막 사용 지정: {name}")
 
         with c3:
-            # 템플릿 가져오기(JSON)
             up = st.file_uploader("가져오기(JSON)", type=["json"], key="tmpl_upload")
             if up is not None:
                 try:
@@ -430,7 +429,6 @@ def main():
                     st.error(f"가져오기 실패: {e}")
 
         with c4:
-            # 템플릿 내보내기(JSON)
             if st.session_state.norm_rects:
                 export_data = {
                     "created_at": datetime.now().isoformat(),
@@ -445,7 +443,6 @@ def main():
                     use_container_width=True
                 )
 
-        # 기존 템플릿 선택/전환/삭제
         tmpls = st.session_state.all_templates
         names = sorted([n for n in tmpls.keys() if n != "__meta"])
         last_used = get_last_used(tmpls)
@@ -491,20 +488,14 @@ def main():
 
     st.markdown("---")
 
-    # ----------------------
     # 파일 업로드
-    # ----------------------
     files = st.file_uploader("📎 PDF 업로드 (대표 1개 + 배치 여러 개 가능)", type=["pdf"], accept_multiple_files=True)
 
-    # ----------------------
-    # 좌표 지정 (대표 PDF) — 템플릿 고정 사용 해제 시에만 노출
-    # ----------------------
-    show_roi_section = not st.session_state.lock_template
-    if show_roi_section:
+    # 좌표 지정 (템플릿 고정 사용 해제 시에만)
+    if not st.session_state.lock_template:
         st.markdown("### 🎯 좌표 지정 (대표 PDF 1페이지 기준)")
         st.caption("필드 순서: " + " → ".join(FIELDS))
 
-        rep_bytes = None
         if files:
             rep = files[0]
             rep_bytes = rep.getvalue() if hasattr(rep, "getvalue") else rep.read()
@@ -516,19 +507,16 @@ def main():
             ratio = disp_w / w
             img_resized = img.resize((disp_w, int(h * ratio)))
 
-            # 진행 현황
             done_cnt = sum(1 for f in FIELDS if f in st.session_state.norm_rects)
             st.progress(done_cnt / len(FIELDS))
             st.write(f"완료 {done_cnt}/{len(FIELDS)}")
 
-            # 현재 필드
             current_field = FIELDS[st.session_state.current_field_idx] if st.session_state.current_field_idx < len(FIELDS) else None
             if current_field:
                 st.info(f"🖱️ {current_field} 영역을 지정하세요 — 먼저 **좌상단**, 다음 **우하단**")
             else:
                 st.success("✅ 모든 필드 좌표 지정 완료!")
 
-            # 오버레이 이미지
             overlay = render_with_overlays(
                 img_resized, w_orig=w, h_orig=h, ratio=ratio,
                 norm_rects=st.session_state.norm_rects,
@@ -536,14 +524,11 @@ def main():
                 current_field=current_field
             )
 
-            # 클릭 수집
-            from streamlit_image_coordinates import streamlit_image_coordinates
             clicked = streamlit_image_coordinates(
                 overlay,
                 key=f"coord_{st.session_state.current_field_idx}_{st.session_state.click_phase}"
             )
 
-            # 클릭 처리
             if clicked and current_field:
                 ox = clicked["x"] / ratio
                 oy = clicked["y"] / ratio
@@ -563,7 +548,6 @@ def main():
                     st.session_state.current_field_idx += 1
                     st.toast(f"{current_field} 좌표 저장!")
 
-            # 단축 버튼
             colA, colB, colC, colD = st.columns(4)
             with colA:
                 if st.button("⏮ 이전 필드", use_container_width=True):
@@ -590,7 +574,6 @@ def main():
                     st.session_state.temp_points = []
                     st.success("전체 좌표 초기화 완료")
 
-            # 저장된 좌표 테이블
             if st.session_state.norm_rects:
                 st.markdown("#### 📋 저장된 좌표(정규화)")
                 rows = []
@@ -608,9 +591,7 @@ def main():
 
     st.markdown("---")
 
-    # ----------------------
     # 변환 실행
-    # ----------------------
     if files and st.button("🚀 변환 시작", type="primary", use_container_width=True):
         if not st.session_state.norm_rects or any(f not in st.session_state.norm_rects for f in FIELDS):
             st.error("모든 필드의 좌표가 지정되지 않았어요. '템플릿 고정 사용'을 끄고 ROI를 먼저 지정/저장하세요.")
@@ -620,7 +601,6 @@ def main():
         for f in files:
             try:
                 f_bytes = f.getvalue() if hasattr(f, "getvalue") else f.read()
-                # 페이지 rect
                 _, _, _, page_rect = pdf_first_page_pix(f_bytes, dpi=st.session_state.tmpl_dpi)
 
                 data = {}
@@ -629,7 +609,6 @@ def main():
                     raw = clip_text_by_norm_rect(f_bytes, rect, page_rect)
                     data[name] = postprocess_field(name, raw)
 
-                # 형식 검증
                 if data["신고일"] and not re.match(r'^\d{4}/\d{2}/\d{2}$', data["신고일"]):
                     issues.append(f"⚠️ {getattr(f,'name','파일')} : 신고일 형식 확인 → {data['신고일']}")
                 for k in ["환율", "부가가치세 과표", "관세", "부가가치세"]:
@@ -649,13 +628,11 @@ def main():
 
         df = pd.DataFrame(rows, columns=FIELDS)
 
-        # B/L 중복 경고
         dup_mask = df["b/l(awb)번호"].duplicated(keep=False)
         if dup_mask.any():
             dupped = df.loc[dup_mask, "b/l(awb)번호"].unique().tolist()
             st.warning(f"⚠️ 동일 B/L 번호 중복: {', '.join(dupped)}")
 
-        # 신고일 오름차순
         def to_date(s):
             try:
                 return datetime.strptime(s, "%Y/%m/%d")
@@ -665,7 +642,6 @@ def main():
 
         st.markdown("### ✅ 변환 결과")
         view = df.copy()
-        # 보기 포맷
         view["환율"] = view["환율"].map(lambda x: f"{x:.4f}" if isinstance(x, (int, float)) else "")
         for k in ["부가가치세 과표", "관세", "부가가치세"]:
             view[k] = view[k].map(lambda x: f"{int(x):,}" if pd.notnull(x) and x != "" else "")
@@ -676,7 +652,6 @@ def main():
             for line in issues:
                 st.write(line)
 
-        # 엑셀 다운로드(원본 df 사용)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
             df.to_excel(writer, sheet_name="results", index=False)
@@ -703,7 +678,7 @@ def main():
             use_container_width=True
         )
 
-    st.caption("ⓘ 전역 폰트는 '맑은 고딕' 우선이며, 서버에 없으면 Noto/Nanum으로 자동 폴백합니다. PIL 라벨도 같은 폰트를 사용해 한글이 깨지지 않습니다. 템플릿은 '마지막 사용'으로 지정 시 앱 재시작 후에도 자동 적용됩니다.")
+    st.caption("ⓘ 국내도착항은 항 코드(KRPTK 등)를 무시하고 한글 지명(예: 평택항/인천공항 등)만 추출합니다. 템플릿은 '마지막 사용' 지정 시 자동 적용됩니다.")
 
 if __name__ == "__main__":
     main()
